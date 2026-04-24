@@ -1,0 +1,18 @@
+# Node dependencies
+node_modules/
+
+# 스크래퍼 출력물 (대용량 · 원본 사이트 재현 가능)
+scraped_data/
+scraped_images/
+
+# 로그
+*.log
+
+# 초기 URL 수집 결과 (재생성 가능)
+post_ids.txt
+
+# 에디터/시스템
+.claude/
+.DS_Store
+Thumbs.db
+*.tmp
