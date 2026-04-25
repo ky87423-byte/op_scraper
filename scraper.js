@@ -57,9 +57,10 @@ function loadDone() {
     return new Set(fs.readFileSync(DONE_FILE,'utf8').split('\n').filter(Boolean));
 }
 
-// ── 이미지 다운로드 (Puppeteer 세션 이용 → 쿠키 자동 포함) ─────────
+// ── 이미지 다운로드 (page fetch 실패 시 Node fetch fallback — 외부 CDN/CORS 대응) ──
 async function downloadImageWithPage(page, imgUrl, destPath) {
     if (fs.existsSync(destPath)) return true;
+    // 1) 페이지 컨텍스트 fetch (same-origin 일 때)
     try {
         const result = await page.evaluate(async (url) => {
             try {
@@ -69,10 +70,29 @@ async function downloadImageWithPage(page, imgUrl, destPath) {
                 return { ok: true, data: Array.from(new Uint8Array(ab)) };
             } catch(e) { return { ok: false, reason: e.message }; }
         }, imgUrl);
-        if (!result.ok) return false;
-        fs.writeFileSync(destPath, Buffer.from(result.data));
+        if (result.ok) {
+            fs.writeFileSync(destPath, Buffer.from(result.data));
+            return true;
+        }
+    } catch (e) { /* 다음 단계로 */ }
+
+    // 2) Node fetch fallback — 외부 CDN(CORS 차단) 케이스 대응
+    try {
+        const cookies = await page.cookies();
+        const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+        const res = await fetch(imgUrl, {
+            headers: {
+                'User-Agent': CFG.userAgent,
+                'Referer':    'https://opga037.com/',
+                'Cookie':     cookieHeader,
+            },
+        });
+        if (!res.ok) return false;
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length < 1000) return false;   // 1KB 미만 = placeholder/에러
+        fs.writeFileSync(destPath, buf);
         return true;
-    } catch(e) {
+    } catch (e) {
         return false;
     }
 }
@@ -199,20 +219,35 @@ async function scrapeDetail(page, item, idx) {
         const authorMatch = fullText.match(/\[[^\]]*-[^\]]*\][^\n]*\n[\s　]*([^\n\s][^\n]*?)\s{2,}\d/u);
         const author = authorMatch ? authorMatch[1].trim() : '';
 
-        // 이미지: 같은 도메인 + 흔한 게시판 업로더 경로 (editor·file·cheditor·attach·gallery·upload)
-        // 외부 광고/배너/스킨 이미지는 제외
+        // 이미지 추출 — 블랙리스트 (사이트 자산 제외) + 사이즈/lazy 속성 + 외부 CDN 허용
+        // (이 사이트는 본문 이미지를 외부 CDN — 예: pfcream.diskn.com — 에 호스팅하고 확장자 없는 URL 사용)
         const imgUrls = [...new Set(
             [...document.querySelectorAll('img')]
-                .map(i => i.src)
-                .filter(s => {
-                    if (!s) return false;
-                    if (!/\.(jpg|jpeg|png|gif|webp)/i.test(s)) return false;
-                    // 같은 도메인 또는 절대 경로 (외부 광고 제외)
-                    if (!/^(https?:\/\/[^/]*opga037|\/)/.test(s)) return false;
-                    // 흔한 게시판 업로드 경로
-                    return /\/data\/(editor|file|cheditor|attach|gallery)\//.test(s)
-                        || /\/upload\//.test(s);
+                .map(i => {
+                    // src + lazy-load 속성 모두 시도
+                    const src = i.src
+                             || i.getAttribute('data-src')
+                             || i.getAttribute('data-original')
+                             || i.getAttribute('data-lazy-src') || '';
+                    return { src, w: i.naturalWidth || 0 };
                 })
+                .filter(({ src, w }) => {
+                    if (!src) return false;
+                    // 명백한 사이트 자산 경로 제외
+                    if (/\/(skin|thema|theme|sns|banner|button|footer|header|nav|emoticon|emo|level\/icon|mobile_logo|sprite)\//i.test(src)) return false;
+                    // opga037 자체 /img/ 경로 = 보통 사이트 자산
+                    if (/opga037\.[^/]+\/img\//i.test(src)) return false;
+                    // 회원 프로필 사진 (작은 thumbnail 다수)
+                    if (/\/data\/apms\/photo\//i.test(src)) return false;
+                    // base64 / blob
+                    if (/^(data:|blob:)/i.test(src)) return false;
+                    // 사이즈 필터 — 실제 크기를 알면 작은 아이콘(<200px) 제외
+                    // (naturalWidth=0 이면 외부 CDN 등 미로드 → 일단 통과)
+                    if (w > 0 && w < 200) return false;
+                    return true;
+                })
+                .map(o => o.src)
+                .slice(0, 50)
         )];
 
         // 전화번호

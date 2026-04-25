@@ -119,9 +119,12 @@ async function main() {
                 const newRow = await scrapeDetail(page, item, i + 1);
                 if (!newRow) { failed++; continue; }
 
-                // shops.json 매칭 + 업데이트
-                const key  = `${newRow.company}|${newRow.area}`;
-                const idxs = shopIndex.get(key) || [];
+                // shops.json 매칭 — 1차: scraper.log 원본 (item) 키 (옛 shops.json 에 저장된 그 값)
+                //                  2차: 새 newRow 키 fallback (사이트가 그 사이 변경된 케이스)
+                let idxs = shopIndex.get(`${item.company}|${item.area}`) || [];
+                if (idxs.length === 0) {
+                    idxs = shopIndex.get(`${newRow.company}|${newRow.area}`) || [];
+                }
                 let touched = false;
 
                 for (const idx of idxs) {
@@ -134,13 +137,19 @@ async function main() {
                         shops[idx].lastScrapedAt = new Date().toISOString();
                         touched = true;
                         updated++;
-                        rlog(`   ✅ 업데이트 ${shops[idx].mainPhoto ? '(이미지 ' + (1 + (newRow.photos || '').split(',').filter(Boolean).length) + '개)' : ''}`);
-                        break;   // 동일 (company+area) 중 첫 매칭만 갱신
+                        const photoCnt = 1 + (newRow.photos || '').split(',').filter(Boolean).length;
+                        rlog(`   ✅ 업데이트 (이미지 ${photoCnt}개)`);
+                        break;
                     }
                 }
                 if (!touched) {
                     stillEmpty++;
-                    rlog(`   ⚪ 여전히 이미지 없음 (원본 글에 진짜 없는 듯)`);
+                    if (newRow.mainPhoto && newRow.mainPhoto !== '') {
+                        // 이미지는 있는데 매칭 실패 — 디버그 정보 출력
+                        rlog(`   ⚠ 매칭 실패 (이미지 ${1 + (newRow.photos || '').split(',').filter(Boolean).length}개): item="${item.company}|${item.area}" vs new="${newRow.company}|${newRow.area}" idxs=${idxs.length}`);
+                    } else {
+                        rlog(`   ⚪ 여전히 이미지 없음 (원본 글에 진짜 없는 듯)`);
+                    }
                 }
             } catch (e) {
                 failed++;
