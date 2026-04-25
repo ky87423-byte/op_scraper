@@ -59,11 +59,20 @@ async function main() {
         rlog(`⚠ urls.json에 없는 wr_id ${missing.length}개: ${missing.join(', ')}`);
     }
 
-    // 3. 브라우저 + 로그인
+    // 3. 브라우저 + 로그인 (scraper.js 와 동일한 bot 감지 회피 설정)
+    const isHeadless = process.env.HEADLESS === 'true';
     const browser = await puppeteer.launch({
-        headless: true,
+        headless: isHeadless,
         protocolTimeout: 60000,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-web-security',
+            '--start-maximized',
+        ],
+        defaultViewport: null,
     });
 
     const succeeded = [];

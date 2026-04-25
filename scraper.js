@@ -291,10 +291,21 @@ async function main() {
     initData();
     log('=== 스크래퍼 시작 ===');
 
+    // 헤드리스 모드 감지 회피 — false 로 두면 실제 Chrome 창이 뜨지만 bot 감지 통과율 ↑
+    // 환경변수 HEADLESS=true 로 강제 헤드리스 가능 (서버 환경 등)
+    const isHeadless = process.env.HEADLESS === 'true';
     const browser = await puppeteer.launch({
-        headless: true,
+        headless: isHeadless,
         protocolTimeout: 60000,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-web-security',
+            '--start-maximized',
+        ],
+        defaultViewport: null,   // 창 크기에 맞춰 자동
     });
 
     try {
@@ -302,9 +313,33 @@ async function main() {
         await page.setUserAgent(CFG.userAgent);
         await page.setViewport({ width: 1366, height: 768 });
         await page.evaluateOnNewDocument(() => {
+            // navigator.webdriver 숨김
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            // plugins/languages 정상 브라우저처럼
+            Object.defineProperty(navigator, 'plugins',   { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });
+            // chrome 객체 존재 (헤드리스에서는 없음)
+            // @ts-ignore
+            window.chrome = { runtime: {} };
+            // permissions API 정상 응답
+            const origQuery = window.navigator.permissions?.query;
+            if (origQuery) {
+                window.navigator.permissions.query = (params) =>
+                    params.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : origQuery(params);
+            }
         });
-        page.on('dialog', async d => { log(`[Dialog] ${d.message().substring(0,80)}`); await d.accept(); });
+        // ── 다이얼로그 핸들러: "로그인 필요" 메시지 감지 시 재로그인 플래그 설정 ──
+        let needRelogin = false;
+        page.on('dialog', async d => {
+            const msg = d.message();
+            log(`[Dialog] ${msg.substring(0,80)}`);
+            if (msg.includes('로그인이 필요') || msg.includes('로그인이 필')) {
+                needRelogin = true;
+            }
+            await d.accept();
+        });
 
         // 1. 로그인
         await login(page);
@@ -320,13 +355,45 @@ async function main() {
 
         // 3. 상세 스크래핑
         const done = loadDone();
+        // 에러로 기록된 wr_id 도 main loop 에서는 건너뜀 — retry-errors.js 로 별도 처리
+        const errored = fs.existsSync(ERROR_FILE)
+            ? new Set(fs.readFileSync(ERROR_FILE, 'utf8').split('\n').map(s => s.trim()).filter(Boolean))
+            : new Set();
         let count = 0;
+        let consecutiveDialogErrors = 0;   // 다이얼로그-기반 timeout 연속 횟수
 
-        log(`\n상세 스크래핑 시작 (총 ${items.length}개, 완료: ${done.size}개 스킵)`);
+        log(`\n상세 스크래핑 시작 (총 ${items.length}개, 완료 ${done.size} + 에러 ${errored.size} 스킵)`);
+
+        // 재로그인 쿨다운 (사이트가 차단 중일 수 있어 무한 재시도 방지)
+        let lastReloginAttempt = 0;
+        const RELOGIN_COOLDOWN_MS = 5 * 60_000; // 5분
 
         for (const item of items) {
-            if (done.has(item.wr_id)) continue;
+            if (done.has(item.wr_id) || errored.has(item.wr_id)) continue;
             count++;
+
+            // 연속 3회 이상 다이얼로그-timeout 발생 시에만 진짜 세션 만료로 간주
+            // (개별 글이 삭제된 경우 한두 번 timeout은 정상 — 재로그인 불필요)
+            if (needRelogin && consecutiveDialogErrors >= 3) {
+                needRelogin = false;
+                consecutiveDialogErrors = 0;
+                const since = Date.now() - lastReloginAttempt;
+                if (since < RELOGIN_COOLDOWN_MS) {
+                    log(`⏳ 재로그인 쿨다운 중 (${Math.round(since/1000)}/${RELOGIN_COOLDOWN_MS/1000}초) — 스킵`);
+                } else {
+                    lastReloginAttempt = Date.now();
+                    log(`🔐 연속 ${consecutiveDialogErrors}회 다이얼로그 → 진짜 세션 만료로 판단, 재로그인`);
+                    try {
+                        const cookies = await page.cookies();
+                        if (cookies.length > 0) await page.deleteCookie(...cookies);
+                        await login(page);
+                    } catch (e) {
+                        log(`즉시 재로그인 실패: ${e.message} — ${RELOGIN_COOLDOWN_MS/60000}분 후 자동 재시도`);
+                    }
+                }
+            } else if (needRelogin) {
+                needRelogin = false;  // 연속 카운트 미달 — 그냥 다음 글로
+            }
 
             // 100건마다 장기 휴식 + 세션 체크
             if (count % CFG.pauseEvery === 0) {
@@ -344,9 +411,16 @@ async function main() {
             try {
                 await scrapeDetail(page, item, count);
                 fs.appendFileSync(DONE_FILE, item.wr_id + '\n');
+                consecutiveDialogErrors = 0;   // 성공 시 리셋
             } catch(e) {
                 log(`[오류] wr_id=${item.wr_id}: ${e.message}`);
                 fs.appendFileSync(ERROR_FILE, item.wr_id + '\n');
+                // 다이얼로그-timeout 패턴이면 연속 카운트 증가
+                if (needRelogin || /Navigation timeout/i.test(e.message)) {
+                    consecutiveDialogErrors++;
+                } else {
+                    consecutiveDialogErrors = 0;
+                }
             }
 
             // 5~10초 랜덤 대기
