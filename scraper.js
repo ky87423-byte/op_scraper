@@ -16,8 +16,8 @@ const CFG = {
     pw:            'asdf87a',
     baseUrl:       'https://opga037.com',
     listUrl:       'https://opga037.com/bbs/board.php?bo_table=op_partner_posting&cat=0&cat2=0&biz=0',
-    delayMin:      5000,
-    delayMax:      10000,
+    delayMin:      2000,    // 2~5초 랜덤 딜레이 (차단 방지 + 스크래퍼 효율)
+    delayMax:      5000,
     pauseEvery:    100,
     pauseDuration: 30000,
     imageDir:      path.join(__dirname, 'scraped_images'),
@@ -263,6 +263,7 @@ async function scrapeDetail(page, item, idx) {
     const content = savedPaths.map(p => `<img src="${p}">`).join('\n');
 
     const row = {
+        externalId: parseInt(item.wr_id, 10),  // 스마트 upsert 키 (외부 사이트 wr_id)
         company,
         subject,
         content,
