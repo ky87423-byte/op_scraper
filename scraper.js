@@ -199,11 +199,20 @@ async function scrapeDetail(page, item, idx) {
         const authorMatch = fullText.match(/\[[^\]]*-[^\]]*\][^\n]*\n[\s　]*([^\n\s][^\n]*?)\s{2,}\d/u);
         const author = authorMatch ? authorMatch[1].trim() : '';
 
-        // 이미지: /data/editor/ 경로 (실제 업소 이미지)
+        // 이미지: 같은 도메인 + 흔한 게시판 업로더 경로 (editor·file·cheditor·attach·gallery·upload)
+        // 외부 광고/배너/스킨 이미지는 제외
         const imgUrls = [...new Set(
             [...document.querySelectorAll('img')]
                 .map(i => i.src)
-                .filter(s => s && s.includes('/data/editor/') && /\.(jpg|jpeg|png|gif|webp)/i.test(s))
+                .filter(s => {
+                    if (!s) return false;
+                    if (!/\.(jpg|jpeg|png|gif|webp)/i.test(s)) return false;
+                    // 같은 도메인 또는 절대 경로 (외부 광고 제외)
+                    if (!/^(https?:\/\/[^/]*opga037|\/)/.test(s)) return false;
+                    // 흔한 게시판 업로드 경로
+                    return /\/data\/(editor|file|cheditor|attach|gallery)\//.test(s)
+                        || /\/upload\//.test(s);
+                })
         )];
 
         // 전화번호
